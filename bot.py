@@ -171,52 +171,46 @@ async def caption_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     context.user_data["caption"] = ""
-    return await ask_channels_q(update, context, q)
+    return await ask_channels(update, context, q)
 
 
-async def get_integrations(context):
+async def get_integrations():
     status, body = postiz("GET", "/integrations")
-    if status != 200 or not isinstance(body, list):
+    if not (200 <= status < 300) or not isinstance(body, list):
         log.error("integrations failed: %s %s", status, body)
         return []
     return [i for i in body if not i.get("disabled")]
 
 
-async def ask_channels(update, context):
-    integrations = await get_integrations(context)
-    context.user_data["integrations"] = integrations
-    context.user_data["chosen"] = []
-    buttons = [
-        (f"📍 {i['name']} ({i['identifier']})", f"ch:{i['id']}")
-        for i in integrations
-    ]
-    if not buttons:
-        await update.message.reply_text("⚠️ No channels connected in Postiz.")
-        return ConversationHandler.END
-    await update.message.reply_text(
-        "📍 <b>Choose channel(s)</b> to post to:",
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb([buttons[:2], buttons[2:4], [("✅ Done selecting", "ch:done"), ("❌ Cancel", "cancel")]]),
-    )
-    return CHANNEL
+def channel_keyboard(ud):
+    """Channel list with ✅ checklist marks + Done/Cancel."""
+    chosen = ud.get("chosen", [])
+    rows = []
+    ints = ud.get("integrations", [])
+    # one channel per row, marked when selected
+    for i in ints:
+        mark = "✅ " if i["id"] in chosen else ""
+        rows.append([(f"{mark}{i['name']} ({i['identifier']})", f"ch:{i['id']}")])
+    rows.append([("✅ Done — continue", "ch:done"), ("❌ Cancel", "cancel")])
+    return kb(rows)
 
 
-async def ask_channels_q(update, context, q):
-    integrations = await get_integrations(context)
+async def ask_channels(update, context, q=None):
+    integrations = await get_integrations()
+    if not integrations:
+        text = "⚠️ No channels connected in Postiz."
+        if q:
+            await q.edit_message_text(text)
+        else:
+            await update.message.reply_text(text)
+        return ConversationHandler.END
     context.user_data["integrations"] = integrations
     context.user_data["chosen"] = []
-    buttons = [
-        (f"📍 {i['name']} ({i['identifier']})", f"ch:{i['id']}")
-        for i in integrations
-    ]
-    if not buttons:
-        await q.edit_message_text("⚠️ No channels connected in Postiz.")
-        return ConversationHandler.END
-    await q.edit_message_text(
-        "📍 <b>Choose channel(s)</b> to post to:",
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb([buttons[:2], buttons[2:4], [("✅ Done selecting", "ch:done"), ("❌ Cancel", "cancel")]]),
-    )
+    text = "📍 <b>Choose channel(s)</b> to post to:\n<i>Tap to select, tap again to deselect.</i>"
+    if q:
+        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=channel_keyboard(context.user_data))
+    else:
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=channel_keyboard(context.user_data))
     return CHANNEL
 
 
@@ -228,11 +222,17 @@ async def channel_toggled(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not chosen:
             await q.answer("Select at least one channel!", show_alert=True)
             return CHANNEL
+        # re-render keyboard so the final state is visible, then move on
         names = ", ".join(
-            next(i["name"] for i in context.user_data["integrations"] if i["id"] == c)
-            for c in chosen
+            i["name"] for i in context.user_data["integrations"] if i["id"] in chosen
         )
         await q.edit_message_text(
+            "📍 <b>Choose channel(s)</b> to post to:\n<i>Tap to select, tap again to deselect.</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=channel_keyboard(context.user_data),
+        )
+        await context.bot.send_message(
+            q.message.chat_id,
             f"✅ Channels: <b>{names}</b>\n\n➕ Add another channel?",
             parse_mode=ParseMode.HTML,
             reply_markup=kb([[("➕ Add channel", "more:yes"), ("✅ No, continue", "more:no")]]),
@@ -246,6 +246,8 @@ async def channel_toggled(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         chosen.append(ch_id)
         await q.answer("Added")
+    # re-render with updated ✅ marks
+    await q.edit_message_reply_markup(reply_markup=channel_keyboard(context.user_data))
     return CHANNEL
 
 
@@ -253,16 +255,11 @@ async def more_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     if q.data == "more:yes":
-        integrations = await get_integrations(context)
-        context.user_data["integrations"] = integrations
-        buttons = [
-            (f"📍 {i['name']} ({i['identifier']})", f"ch:{i['id']}")
-            for i in integrations
-        ]
+        # back to channel list, checklist preserved
         await q.edit_message_text(
-            f"📍 Current: {len(context.user_data['chosen'])} selected.\n"
-            "Pick more channel(s), then Done:",
-            reply_markup=kb([buttons[:2], buttons[2:4], [("✅ Done", "ch:done"), ("❌ Cancel", "cancel")]]),
+            "📍 <b>Choose channel(s)</b> to post to:\n<i>Tap to select, tap again to deselect.</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=channel_keyboard(context.user_data),
         )
         return CHANNEL
     await q.edit_message_text(
@@ -472,7 +469,8 @@ def sync_do_post(ud):
         ident = i["identifier"]
         s = {"__type": ident}
         if ident == "instagram":
-            s["post_type"] = "video" if any(k == "video" for _, k in media_files) else "post"
+            # post_type: only "post" or "story" — video media is fine inside "post"
+            s["post_type"] = "post"
         settings_by_id[i["id"]] = s
 
     posts = [
