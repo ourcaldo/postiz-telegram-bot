@@ -1,7 +1,8 @@
 """Postiz Telegram Bot - schedule posts to Postiz via chat.
 
-Flow: /start -> source (upload/url) -> media -> caption -> channels (multi)
--> post time (now/schedule) -> date+time -> confirm -> submit to Postiz API.
+Flow: /start -> source (upload/url) -> media -> caption -> product name -> product url
+-> channels (multi) -> post time (now/auto/schedule) -> date+time -> confirm
+-> submit to Postiz API + register product on per-channel bio landing page.
 """
 
 import asyncio
@@ -43,11 +44,13 @@ ALLOWED_USERS = {
     int(u) for u in os.environ.get("ALLOWED_USER_IDS", "").split(",") if u.strip()
 }
 DOWNLOAD_DIR = Path(os.environ.get("DOWNLOAD_DIR", "/tmp/postiz-media"))
+LANDING_URL = os.environ.get("LANDING_URL", "").rstrip("/")  # https://bio-links.xxx.workers.dev
+LANDING_SECRET = os.environ.get("LANDING_SECRET", "")
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # conversation states
-SOURCE, MEDIA, URL, CAPTION, CHANNEL, MORE_CHANNEL, SCHEDULE, DATE, TIME, CONFIRM = range(
-    10
+SOURCE, MEDIA, URL, CAPTION, PRODUCT_NAME, PRODUCT_URL, CHANNEL, MORE_CHANNEL, SCHEDULE, DATE, TIME, CONFIRM = range(
+    12
 )
 
 MEDIA_GIF = "media.gif"
@@ -77,6 +80,47 @@ def postiz(method, path, payload=None, files=None):
 
 
 _settings_cache = {}
+
+
+def register_product(channel, name, url):
+    """Add product to a channel's bio landing page. Returns assigned number, or None."""
+    if not LANDING_URL or not LANDING_SECRET:
+        return None
+    try:
+        r = requests.post(
+            f"{LANDING_URL}/{channel}/add",
+            headers={"X-Webhook-Secret": LANDING_SECRET},
+            json={"name": name, "url": url},
+            timeout=30,
+        )
+        body = r.json()
+        if r.status_code == 200 and body.get("ok"):
+            return body["num"]
+        log.error("landing /%s/add failed: %s %s", channel, r.status_code, body)
+    except (requests.RequestException, ValueError) as e:
+        log.error("landing /%s/add error: %s", channel, e)
+    return None
+
+
+def build_caption(caption, num, url):
+    """Final caption: body + product tutorial + trailing hashtags at the very bottom.
+
+    Only a *trailing* block of hashtags is moved (that's where users put them);
+    hashtags in the middle of the text (e.g. 'Produk #1 terbaik') stay untouched.
+    """
+    body, trailing = caption, ""
+    m = re.search(r"(?:#[\w]+[\s]*)+$", caption)
+    if m:
+        trailing = m.group(0).strip()
+        body = caption[: m.start()].rstrip()
+    tutorial = (
+        f"Kamu bisa cek produknya di bio dengan cara:\n"
+        f"1. Klik tautan di bio\n"
+        f"2. Pilih produk nomor {num}\n"
+        f"3. Produk bisa juga kamu cari melalui url {url}"
+    )
+    parts = [p for p in (body, tutorial, trailing) if p]
+    return "\n\n".join(parts)
 
 
 def fetch_post_type(integration_id):
@@ -209,23 +253,64 @@ async def media_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return MEDIA
     await q.edit_message_text(
         "✍️ <b>Send the caption / text content</b> for the post.\n"
-        "This will be posted along with the media.",
+        "Hashtags will be moved to the very bottom automatically.",
         parse_mode=ParseMode.HTML,
         reply_markup=kb([[("Skip (no caption)", "cap:skip"), ("❌ Cancel", "cancel")]]),
     )
     return CAPTION
 
 
+def ask_product_name(update_or_q, context, is_query=False):
+    """Send the product-name prompt. Returns PRODUCT_NAME."""
+    text = (
+        "🛍 <b>Product name?</b>\n"
+        "Short name shown on the bio page (e.g. <i>Sarung Tangan HP</i>)."
+    )
+    markup = kb([[("Skip — no product", "pn:skip"), ("❌ Cancel", "cancel")]])
+    if is_query:
+        return update_or_q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+    return update_or_q.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+
 async def caption_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["caption"] = update.message.text or ""
-    return await ask_channels(update, context)
+    await ask_product_name(update.message, context)
+    return PRODUCT_NAME
 
 
 async def caption_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     context.user_data["caption"] = ""
+    await ask_product_name(q, context, is_query=True)
+    return PRODUCT_NAME
+
+
+async def product_name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["product_name"] = (update.message.text or "").strip()
+    await update.message.reply_text(
+        "🔗 <b>Send the affiliate URL</b> (Shopee/Tokopedia/etc.)",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb([[("❌ Cancel", "cancel")]]),
+    )
+    return PRODUCT_URL
+
+
+async def product_name_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    context.user_data["product_name"] = None
+    context.user_data["product_url"] = None
     return await ask_channels(update, context, q)
+
+
+async def product_url_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = (update.message.text or "").strip()
+    if not re.match(r"^https?://", url):
+        await update.message.reply_text("⚠️ Send a valid URL starting with http(s)://")
+        return PRODUCT_URL
+    context.user_data["product_url"] = url
+    return await ask_channels(update, context)
 
 
 async def get_integrations():
@@ -423,10 +508,16 @@ def confirm_text(ud):
         for c in ud["chosen"]
     )
     media_desc = f"{len(ud['media_files'])} file(s)" if ud["media_files"] else "none"
+    product = (
+        f"🛍 Product: {ud['product_name']}\n🔗 URL: {ud['product_url']}\n"
+        if ud.get("product_name")
+        else ""
+    )
     return (
         "📋 <b>Confirm your post:</b>\n\n"
         f"🖼 Media: {media_desc}\n"
         f"✍️ Caption: {ud['caption'][:100] or '(none)'}{'…' if len(ud['caption']) > 100 else ''}\n"
+        f"{product}"
         f"📍 Channels: {names}\n"
         f"🕒 When: {when_text(ud)}"
     )
@@ -506,7 +597,6 @@ async def confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def sync_do_post(ud):
     """Synchronous posting pipeline, run in thread."""
-    caption = ud["caption"]
     media_files = ud["media_files"]
     chosen = ud["chosen"]
     integrations = ud["integrations"]
@@ -522,10 +612,12 @@ def sync_do_post(ud):
         log.info("uploaded %s -> %s", path, body["id"])
 
     settings_by_id = {}
+    ident_by_id = {}
     for i in integrations:
         if i["id"] not in chosen:
             continue
         ident = i["identifier"]
+        ident_by_id[i["id"]] = ident
         s = {"__type": ident}
         # post_type per channel: fetched from that channel's settings schema
         # (Instagram: post/story; other channels may have different enums)
@@ -533,6 +625,24 @@ def sync_do_post(ud):
         if pt:
             s["post_type"] = pt
         settings_by_id[i["id"]] = s
+
+    # register product on each chosen channel's bio page -> per-channel number
+    num_by_cid = {}
+    if ud.get("product_name") and ud.get("product_url"):
+        for cid in chosen:
+            num = register_product(ident_by_id[cid], ud["product_name"], ud["product_url"])
+            if num:
+                num_by_cid[cid] = num
+            else:
+                return False, f"Bio page registration failed for {ident_by_id[cid]} — post aborted, nothing sent to Postiz"
+
+    # per-channel caption: tutorial line carries that channel's own product number
+    caption_by_cid = {}
+    for cid in chosen:
+        if cid in num_by_cid:
+            caption_by_cid[cid] = build_caption(ud["caption"], num_by_cid[cid], ud["product_url"])
+        else:
+            caption_by_cid[cid] = ud["caption"]
 
     def payload_for(cids, when, date):
         return {
@@ -543,7 +653,7 @@ def sync_do_post(ud):
             "posts": [
                 {
                     "integration": {"id": cid},
-                    "value": [{"content": caption, "image": uploaded}],
+                    "value": [{"content": caption_by_cid[cid], "image": uploaded}],
                     "settings": settings_by_id[cid],
                 }
                 for cid in cids
@@ -659,6 +769,13 @@ def main():
             CAPTION: [
                 CallbackQueryHandler(caption_skip, pattern=r"^cap:skip"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, caption_received),
+            ],
+            PRODUCT_NAME: [
+                CallbackQueryHandler(product_name_skip, pattern=r"^pn:skip"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, product_name_received),
+            ],
+            PRODUCT_URL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, product_url_received),
             ],
             CHANNEL: [CallbackQueryHandler(channel_toggled, pattern=r"^ch:")],
             MORE_CHANNEL: [CallbackQueryHandler(more_channel, pattern=r"^more:")],

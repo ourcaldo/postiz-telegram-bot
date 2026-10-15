@@ -1,0 +1,11 @@
+name = "bio-links"
+main = "index.js"
+compatibility_date = "2026-10-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "bio-links"
+database_id = "d7e1c3bf-89ea-49c2-bdbe-d1f1f8b0d6aa"
+
+[vars]
+# set real secret with: npx wrangler secret put WEBHOOK_SECRET
