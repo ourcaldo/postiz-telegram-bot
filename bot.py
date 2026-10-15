@@ -458,8 +458,9 @@ def sync_do_post(ud):
     uploaded = []
     for path, _kind in media_files:
         with open(path, "rb") as f:
-            status, body = postiz("POST", "/uploads/upload-file", files={"file": f})
-        if status != 200 or not isinstance(body, dict):
+            status, body = postiz("POST", "/upload", files={"file": f})
+        if not (200 <= status < 300) or not isinstance(body, dict):
+            log.error("postiz /upload failed: %s %s", status, body)
             return False, f"Upload failed ({status}): {body}"
         uploaded.append({"id": body["id"], "path": body["path"]})
         log.info("uploaded %s -> %s", path, body["id"])
@@ -490,7 +491,8 @@ def sync_do_post(ud):
         "posts": posts,
     }
     status, body = postiz("POST", "/posts", payload)
-    if status != 200:
+    if not (200 <= status < 300):
+        log.error("postiz /posts failed: %s %s", status, body)
         return False, f"Postiz error ({status}): {body}"
     if isinstance(body, list):
         ids = ", ".join(str(p.get("postId", "?")) for p in body)
