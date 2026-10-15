@@ -1,0 +1,16 @@
+[Unit]
+Description=Postiz Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/postiz-bot
+EnvironmentFile=/opt/postiz-bot/.env
+ExecStart=/opt/postiz-bot/.venv/bin/python bot.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
