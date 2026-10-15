@@ -20,6 +20,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -222,14 +223,8 @@ async def channel_toggled(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not chosen:
             await q.answer("Select at least one channel!", show_alert=True)
             return CHANNEL
-        # re-render keyboard so the final state is visible, then move on
         names = ", ".join(
             i["name"] for i in context.user_data["integrations"] if i["id"] in chosen
-        )
-        await q.edit_message_text(
-            "📍 <b>Choose channel(s)</b> to post to:\n<i>Tap to select, tap again to deselect.</i>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=channel_keyboard(context.user_data),
         )
         await context.bot.send_message(
             q.message.chat_id,
@@ -246,8 +241,11 @@ async def channel_toggled(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         chosen.append(ch_id)
         await q.answer("Added")
-    # re-render with updated ✅ marks
-    await q.edit_message_reply_markup(reply_markup=channel_keyboard(context.user_data))
+    # re-render with updated ✅ marks; no-op edit is fine to swallow
+    try:
+        await q.edit_message_reply_markup(reply_markup=channel_keyboard(context.user_data))
+    except BadRequest:
+        pass
     return CHANNEL
 
 
