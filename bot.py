@@ -691,6 +691,15 @@ async def url_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not re.match(r"^https?://", url):
         await update.message.reply_text("⚠️ Send a valid URL starting with http(s)://")
         return URL
+    if not re.match(
+        r"^https?://(?:[a-z0-9-]+\.)*(?:instagram\.com|instagr\.am|tiktok\.com|youtu\.be|youtube\.com|facebook\.com|fb\.watch|twitter\.com|x\.com)/",
+        url,
+    ):
+        await update.message.reply_text(
+            "⚠️ Not a video-platform URL (Instagram/TikTok/YouTube/X/Facebook). "
+            "Download only supports those."
+        )
+        return URL
     await update.message.reply_text("⏳ Downloading video… this can take a minute.")
     path = await asyncio.to_thread(ytdlp_download, url, DOWNLOAD_DIR)
     if not path:
@@ -723,18 +732,39 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start_from_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Smart entry: user pasted a URL without /start — skip source step."""
+    """Smart entry: user pasted a video-platform URL without /start.
+
+    Only fires for URLs the downloader supports (see VIDEO_URL_FILTER) —
+    affiliate links (Shopee etc.) never trigger a download.
+    """
     if not is_allowed(update):
         await update.message.reply_text("Not authorized.")
         return ConversationHandler.END
+    ud = context.user_data
+    if ud.get("media_files") is not None:
+        # flow already running — this URL belongs to a step inside it.
+        # Delegate to whichever step expects a URL, never restart into download.
+        if ud.get("product_name") is not None and "chosen" not in ud:
+            return await product_url_received(update, context)  # affiliate step
+        await update.message.reply_text(
+            "⚠️ Flow already running — this step doesn't take a video URL. "
+            "Finish the current step or /cancel."
+        )
+        return None  # None from an entry point = not handled -> state handlers run
     context.user_data.clear()
-    context.user_data["media_files"] = []
-    context.user_data["source"] = "url"
+    ud["media_files"] = []
+    ud["source"] = "url"
     return await url_received(update, context)
 
 
 async def start_from_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Smart entry: user sent media without /start — skip source step."""
+    """Smart entry: user sent media without /start — skip source step.
+
+    Guard: never hijack an in-flight conversation (same reason as
+    start_from_url — e.g. media added during the media step itself).
+    """
+    if context.user_data.get("media_files") is not None:
+        return None  # conversation already active — let state handlers run
     if not is_allowed(update):
         await update.message.reply_text("Not authorized.")
         return ConversationHandler.END
@@ -750,7 +780,11 @@ async def start_from_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    url_filter = filters.Regex(r"^\s*https?://\S+\s*$")
+    # smart entry only for video platforms the downloader supports;
+    # affiliate links (shopee etc.) fall through and never auto-download
+    url_filter = filters.Regex(
+        r"^\s*https?://(?:[a-z0-9-]+\.)*(?:instagram\.com|instagr\.am|tiktok\.com|youtu\.be|youtube\.com|facebook\.com|fb\.watch|twitter\.com|x\.com)/\S*\s*$"
+    )
     conv = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
