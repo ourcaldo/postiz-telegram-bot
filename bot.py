@@ -76,6 +76,59 @@ def postiz(method, path, payload=None, files=None):
     return r.status_code, body
 
 
+_settings_cache = {}
+
+
+def fetch_post_type(integration_id):
+    """Default post_type from the channel's settings schema, or None if not required.
+
+    Each provider has a different enum (Instagram: post/story, others vary) —
+    discovered live from /integration-settings so new channels work without code changes.
+    """
+    if integration_id in _settings_cache:
+        return _settings_cache[integration_id]
+    status, body = postiz("GET", f"/integration-settings/{integration_id}")
+    pt = None
+    if 200 <= status < 300 and isinstance(body, dict):
+        try:
+            out = body["output"]["settings"]
+            props = out["properties"]
+            if "post_type" in props and "post_type" in out.get("required", []):
+                enum = props["post_type"].get("enum", [])
+                pt = "post" if "post" in enum else (enum[0] if enum else None)
+        except (KeyError, TypeError, IndexError):
+            pt = None
+    _settings_cache[integration_id] = pt
+    return pt
+
+
+def auto_date(integration_id):
+    """Auto slot: +1h after the channel's latest published/scheduled post.
+
+    Never in the past (min now+5min); now+1h if the channel has no history.
+    """
+    now = datetime.now(timezone.utc)
+    start = (now - timedelta(days=30)).strftime("%Y-%m-%d")
+    end = (now + timedelta(days=90)).strftime("%Y-%m-%d")
+    status, body = postiz("GET", f"/posts?startDate={start}&endDate={end}")
+    latest = None
+    if 200 <= status < 300 and isinstance(body, dict):
+        for p in body.get("posts", []):
+            if p.get("integration", {}).get("id") != integration_id:
+                continue
+            d = p.get("publishDate")
+            if not d:
+                continue
+            try:
+                dt = datetime.fromisoformat(d.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if latest is None or dt > latest:
+                latest = dt
+    base = latest or now
+    return max(base + timedelta(hours=1), now + timedelta(minutes=5))
+
+
 def is_allowed(update: Update) -> bool:
     if not ALLOWED_USERS:
         return True  # no restriction configured
@@ -266,6 +319,7 @@ async def more_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=kb(
             [
                 [("🚀 Post immediately", "t:now")],
+                [("🤖 Auto — next slot per channel", "t:auto")],
                 [("📅 Schedule", "t:schedule")],
                 [("❌ Cancel", "cancel")],
             ]
@@ -281,6 +335,14 @@ async def time_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["when"] = t
     if t == "now":
         context.user_data["post_date"] = datetime.now(timezone.utc).isoformat()
+        return await confirm_summary(update, context, q)
+    if t == "auto":
+        # per-channel auto date: +1h after that channel's last post/schedule
+        await q.edit_message_text("⏳ Finding next slot per channel…")
+        auto_dates = {}
+        for cid in context.user_data["chosen"]:
+            auto_dates[cid] = await asyncio.to_thread(auto_date, cid)
+        context.user_data["auto_dates"] = auto_dates
         return await confirm_summary(update, context, q)
     await q.edit_message_text(
         "📅 <b>Send the date</b> (e.g. <code>2026-10-20</code> or <code>tomorrow</code>)",
@@ -341,24 +403,38 @@ async def time_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await confirm_summary_msg(update, context)
 
 
-async def confirm_summary_msg(update, context):
-    ud = context.user_data
+def when_text(ud):
+    """Human summary of the post timing, incl. per-channel auto slots."""
+    if ud["when"] == "now":
+        return "🚀 Immediately"
+    if ud["when"] == "auto":
+        lines = [
+            f"🤖 {name}: {dt.astimezone(timezone(timedelta(hours=7))).strftime('%d %b %H:%M')} WIB"
+            for cid, dt in ud["auto_dates"].items()
+            for name in [next(i["name"] for i in ud["integrations"] if i["id"] == cid)]
+        ]
+        return "🤖 Auto (next slot):\n  " + "\n  ".join(lines)
+    return f"📅 {ud['post_date'][:16].replace('T', ' ')} UTC"
+
+
+def confirm_text(ud):
     names = ", ".join(
         next(i["name"] for i in ud["integrations"] if i["id"] == c)
         for c in ud["chosen"]
     )
-    when = (
-        "🚀 Immediately"
-        if ud["when"] == "now"
-        else f"📅 {ud['post_date'][:16].replace('T', ' ')} UTC"
-    )
     media_desc = f"{len(ud['media_files'])} file(s)" if ud["media_files"] else "none"
-    await update.message.reply_text(
+    return (
         "📋 <b>Confirm your post:</b>\n\n"
         f"🖼 Media: {media_desc}\n"
         f"✍️ Caption: {ud['caption'][:100] or '(none)'}{'…' if len(ud['caption']) > 100 else ''}\n"
         f"📍 Channels: {names}\n"
-        f"🕒 When: {when}",
+        f"🕒 When: {when_text(ud)}"
+    )
+
+
+async def confirm_summary_msg(update, context):
+    await update.message.reply_text(
+        confirm_text(context.user_data),
         parse_mode=ParseMode.HTML,
         reply_markup=kb([[("✅ Confirm & Post", "go"), ("❌ Cancel", "cancel")]]),
     )
@@ -366,23 +442,8 @@ async def confirm_summary_msg(update, context):
 
 
 async def confirm_summary(update, context, q):
-    ud = context.user_data
-    names = ", ".join(
-        next(i["name"] for i in ud["integrations"] if i["id"] == c)
-        for c in ud["chosen"]
-    )
-    when = (
-        "🚀 Immediately"
-        if ud["when"] == "now"
-        else f"📅 {ud['post_date'][:16].replace('T', ' ')} UTC"
-    )
-    media_desc = f"{len(ud['media_files'])} file(s)" if ud["media_files"] else "none"
     await q.edit_message_text(
-        "📋 <b>Confirm your post:</b>\n\n"
-        f"🖼 Media: {media_desc}\n"
-        f"✍️ Caption: {ud['caption'][:100] or '(none)'}{'…' if len(ud['caption']) > 100 else ''}\n"
-        f"📍 Channels: {names}\n"
-        f"🕒 When: {when}",
+        confirm_text(context.user_data),
         parse_mode=ParseMode.HTML,
         reply_markup=kb([[("✅ Confirm & Post", "go"), ("❌ Cancel", "cancel")]]),
     )
@@ -466,26 +527,44 @@ def sync_do_post(ud):
             continue
         ident = i["identifier"]
         s = {"__type": ident}
-        if ident == "instagram":
-            # post_type: only "post" or "story" — video media is fine inside "post"
-            s["post_type"] = "post"
+        # post_type per channel: fetched from that channel's settings schema
+        # (Instagram: post/story; other channels may have different enums)
+        pt = fetch_post_type(i["id"])
+        if pt:
+            s["post_type"] = pt
         settings_by_id[i["id"]] = s
 
-    posts = [
-        {
-            "integration": {"id": cid},
-            "value": [{"content": caption, "image": uploaded}],
-            "settings": settings_by_id[cid],
+    def payload_for(cids, when, date):
+        return {
+            "type": when,
+            "date": date,
+            "shortLink": False,
+            "tags": [],
+            "posts": [
+                {
+                    "integration": {"id": cid},
+                    "value": [{"content": caption, "image": uploaded}],
+                    "settings": settings_by_id[cid],
+                }
+                for cid in cids
+            ],
         }
-        for cid in chosen
-    ]
-    payload = {
-        "type": ud["when"],
-        "date": ud["post_date"],
-        "shortLink": False,
-        "tags": [],
-        "posts": posts,
-    }
+
+    if ud["when"] == "auto":
+        # per-channel date: one API call per channel, each with its own auto slot
+        results = []
+        for cid, dt in ud["auto_dates"].items():
+            status, body = postiz("POST", "/posts", payload_for([cid], "schedule", dt.isoformat()))
+            if not (200 <= status < 300):
+                log.error("postiz /posts (auto %s) failed: %s %s", cid, status, body)
+                return False, f"Postiz error ({status}): {body}"
+            if isinstance(body, list):
+                results.extend(str(p.get("postId", "?")) for p in body)
+            else:
+                results.append(str(body))
+        return True, ", ".join(results)
+
+    payload = payload_for(chosen, ud["when"], ud["post_date"])
     status, body = postiz("POST", "/posts", payload)
     if not (200 <= status < 300):
         log.error("postiz /posts failed: %s %s", status, body)
@@ -533,10 +612,41 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def start_from_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Smart entry: user pasted a URL without /start — skip source step."""
+    if not is_allowed(update):
+        await update.message.reply_text("Not authorized.")
+        return ConversationHandler.END
+    context.user_data.clear()
+    context.user_data["media_files"] = []
+    context.user_data["source"] = "url"
+    return await url_received(update, context)
+
+
+async def start_from_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Smart entry: user sent media without /start — skip source step."""
+    if not is_allowed(update):
+        await update.message.reply_text("Not authorized.")
+        return ConversationHandler.END
+    context.user_data.clear()
+    context.user_data["media_files"] = []
+    context.user_data["source"] = "upload"
+    await update.message.reply_text(
+        "📷 Got media. Send more, or tap Done when finished.",
+        reply_markup=kb([[("✅ Done", "media:done"), ("❌ Cancel", "cancel")]]),
+    )
+    return await media_received(update, context)
+
+
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
+    url_filter = filters.Regex(r"^\s*https?://\S+\s*$")
     conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        entry_points=[
+            CommandHandler("start", start),
+            MessageHandler(url_filter & ~filters.COMMAND, start_from_url),
+            MessageHandler(filters.PHOTO | filters.VIDEO, start_from_media),
+        ],
         states={
             SOURCE: [CallbackQueryHandler(source_chosen, pattern=r"^src:")],
             MEDIA: [
