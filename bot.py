@@ -124,10 +124,12 @@ def build_caption(caption, num, url):
 
 
 def fetch_post_type(integration_id):
-    """Default post_type from the channel's settings schema, or None if not required.
+    """Default post_type from the channel's settings schema, or None if absent.
 
-    Each provider has a different enum (Instagram: post/story, others vary) —
-    discovered live from /integration-settings so new channels work without code changes.
+    Each provider has a different enum (Instagram: post/story, Facebook:
+    post/story optional, others vary) — discovered live from
+    /integration-settings so new channels work without code changes.
+    Sent even when optional: explicit beats relying on provider defaults.
     """
     if integration_id in _settings_cache:
         return _settings_cache[integration_id]
@@ -137,7 +139,7 @@ def fetch_post_type(integration_id):
         try:
             out = body["output"]["settings"]
             props = out["properties"]
-            if "post_type" in props and "post_type" in out.get("required", []):
+            if "post_type" in props:
                 enum = props["post_type"].get("enum", [])
                 pt = "post" if "post" in enum else (enum[0] if enum else None)
         except (KeyError, TypeError, IndexError):
