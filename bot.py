@@ -324,11 +324,11 @@ async def get_integrations():
 
 
 def channel_keyboard(ud):
-    """Channel list with ✅ checklist marks + Done/Cancel."""
+    """Channel list with ✅ checklist marks, Select All, Done/Cancel."""
     chosen = ud.get("chosen", [])
-    rows = []
     ints = ud.get("integrations", [])
-    # one channel per row, marked when selected
+    all_selected = len(chosen) == len(ints) and bool(ints)
+    rows = [[("🌐 " + ("✅ " if all_selected else "") + "All channels", "ch:all")]]
     for i in ints:
         mark = "✅ " if i["id"] in chosen else ""
         rows.append([(f"{mark}{i['name']} ({i['identifier']})", f"ch:{i['id']}")])
@@ -375,6 +375,20 @@ async def channel_toggled(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return MORE_CHANNEL
     ch_id = q.data.split(":")[1]
     chosen = context.user_data.setdefault("chosen", [])
+    ints = context.user_data.get("integrations", [])
+    if ch_id == "all":
+        # toggle all: on if not everything selected, off if it is
+        if len(chosen) == len(ints) and ints:
+            chosen.clear()
+            await q.answer("All cleared")
+        else:
+            chosen[:] = [i["id"] for i in ints]
+            await q.answer(f"All {len(ints)} selected")
+        try:
+            await q.edit_message_reply_markup(reply_markup=channel_keyboard(context.user_data))
+        except BadRequest:
+            pass
+        return CHANNEL
     if ch_id in chosen:
         chosen.remove(ch_id)
         await q.answer("Removed")
