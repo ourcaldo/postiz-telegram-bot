@@ -642,15 +642,19 @@ def sync_do_post(ud):
             s["post_type"] = pt
         settings_by_id[i["id"]] = s
 
-    # register product on each chosen channel's bio page -> per-channel number
+    # register product once per landing page (identifier), not per channel:
+    # 5 Facebook pages share the /facebook page -> one entry, shared number
     num_by_cid = {}
     if ud.get("product_name") and ud.get("product_url"):
+        num_by_ident = {}
         for cid in chosen:
-            num = register_product(ident_by_id[cid], ud["product_name"], ud["product_url"])
-            if num:
-                num_by_cid[cid] = num
-            else:
-                return False, f"Bio page registration failed for {ident_by_id[cid]} — post aborted, nothing sent to Postiz"
+            ident = ident_by_id[cid]
+            if ident not in num_by_ident:
+                num = register_product(ident, ud["product_name"], ud["product_url"])
+                if not num:
+                    return False, f"Bio page registration failed for {ident} — post aborted, nothing sent to Postiz"
+                num_by_ident[ident] = num
+            num_by_cid[cid] = num_by_ident[ident]
 
     # per-channel caption: tutorial line carries that channel's own product number
     caption_by_cid = {}
