@@ -182,6 +182,9 @@ def is_allowed(update: Update) -> bool:
     return u is not None and u.id in ALLOWED_USERS
 
 
+BACK_ROW = [("◀️ Back", "back"), ("❌ Cancel", "cancel")]
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
         await update.message.reply_text("Not authorized.")
@@ -214,7 +217,7 @@ async def source_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔗 <b>Send the URL</b> (Instagram Reels, TikTok, YouTube, etc.)\n"
         "I'll download the video on the backend.",
         parse_mode=ParseMode.HTML,
-        reply_markup=kb([[("❌ Cancel", "cancel")]]),
+        reply_markup=kb([BACK_ROW]),
     )
     return URL
 
@@ -242,7 +245,7 @@ async def media_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["media_files"].append((str(dest), kind))
     await msg.reply_text(
         f"✅ Got {kind} #{len(context.user_data['media_files'])}. Send more or tap Done.",
-        reply_markup=kb([[("✅ Done", "media:done"), ("❌ Cancel", "cancel")]]),
+        reply_markup=kb([[("✅ Done", "media:done")] + BACK_ROW]),
     )
     return MEDIA
 
@@ -257,7 +260,7 @@ async def media_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✍️ <b>Send the caption / text content</b> for the post.\n"
         "Hashtags will be moved to the very bottom automatically.",
         parse_mode=ParseMode.HTML,
-        reply_markup=kb([[("Skip (no caption)", "cap:skip"), ("❌ Cancel", "cancel")]]),
+        reply_markup=kb([[("Skip (no caption)", "cap:skip")] + BACK_ROW]),
     )
     return CAPTION
 
@@ -268,7 +271,7 @@ def ask_product_name(update_or_q, context, is_query=False):
         "🛍 <b>Product name?</b>\n"
         "Short name shown on the bio page (e.g. <i>Sarung Tangan HP</i>)."
     )
-    markup = kb([[("Skip — no product", "pn:skip"), ("❌ Cancel", "cancel")]])
+    markup = kb([[("Skip — no product", "pn:skip")] + BACK_ROW])
     if is_query:
         return update_or_q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
     return update_or_q.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
@@ -293,7 +296,7 @@ async def product_name_received(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text(
         "🔗 <b>Send the affiliate URL</b> (Shopee/Tokopedia/etc.)",
         parse_mode=ParseMode.HTML,
-        reply_markup=kb([[("❌ Cancel", "cancel")]]),
+        reply_markup=kb([BACK_ROW]),
     )
     return PRODUCT_URL
 
@@ -332,7 +335,8 @@ def channel_keyboard(ud):
     for i in ints:
         mark = "✅ " if i["id"] in chosen else ""
         rows.append([(f"{mark}{i['name']} ({i['identifier']})", f"ch:{i['id']}")])
-    rows.append([("✅ Done — continue", "ch:done"), ("❌ Cancel", "cancel")])
+    rows.append([("✅ Done — continue", "ch:done")])
+    rows.append(BACK_ROW)
     return kb(rows)
 
 
@@ -370,7 +374,7 @@ async def channel_toggled(update: Update, context: ContextTypes.DEFAULT_TYPE):
             q.message.chat_id,
             f"✅ Channels: <b>{names}</b>\n\n➕ Add another channel?",
             parse_mode=ParseMode.HTML,
-            reply_markup=kb([[("➕ Add channel", "more:yes"), ("✅ No, continue", "more:no")]]),
+            reply_markup=kb([[("➕ Add channel", "more:yes"), ("✅ No, continue", "more:no")], BACK_ROW]),
         )
         return MORE_CHANNEL
     ch_id = q.data.split(":")[1]
@@ -422,8 +426,7 @@ async def more_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [("🚀 Post immediately", "t:now")],
                 [("🤖 Auto — next slot per channel", "t:auto")],
                 [("📅 Schedule", "t:schedule")],
-                [("❌ Cancel", "cancel")],
-            ]
+            ] + [BACK_ROW]
         ),
     )
     return SCHEDULE
@@ -448,7 +451,7 @@ async def time_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text(
         "📅 <b>Send the date</b> (e.g. <code>2026-10-20</code> or <code>tomorrow</code>)",
         parse_mode=ParseMode.HTML,
-        reply_markup=kb([[("❌ Cancel", "cancel")]]),
+        reply_markup=kb([BACK_ROW]),
     )
     return DATE
 
@@ -480,7 +483,7 @@ async def date_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"📅 {d.isoformat()}\n\n⏰ <b>Send the time</b> (HH:MM, WIB/UTC+7)",
         parse_mode=ParseMode.HTML,
-        reply_markup=kb([[("❌ Cancel", "cancel")]]),
+        reply_markup=kb([BACK_ROW]),
     )
     return TIME
 
@@ -543,7 +546,7 @@ async def confirm_summary_msg(update, context):
     await update.message.reply_text(
         confirm_text(context.user_data),
         parse_mode=ParseMode.HTML,
-        reply_markup=kb([[("✅ Confirm & Post", "go"), ("❌ Cancel", "cancel")]]),
+        reply_markup=kb([[("✅ Confirm & Post", "go")] + BACK_ROW]),
     )
     return CONFIRM
 
@@ -552,7 +555,7 @@ async def confirm_summary(update, context, q):
     await q.edit_message_text(
         confirm_text(context.user_data),
         parse_mode=ParseMode.HTML,
-        reply_markup=kb([[("✅ Confirm & Post", "go"), ("❌ Cancel", "cancel")]]),
+        reply_markup=kb([[("✅ Confirm & Post", "go")] + BACK_ROW]),
     )
     return CONFIRM
 
@@ -724,7 +727,8 @@ async def url_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     path = await asyncio.to_thread(ytdlp_download, url, DOWNLOAD_DIR)
     if not path:
         await update.message.reply_text(
-            "❌ Download failed. Check the URL, or the video may be private/too long."
+            "❌ Download failed — the video may be private, deleted, or too long.\n"
+            "Send another URL to retry, or tap Back."
         )
         return URL
     kind = "video" if path.suffix.lower() in (".mp4", ".webm", ".mov") else "image"
@@ -737,6 +741,100 @@ async def url_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=kb([[("Skip (no caption)", "cap:skip"), ("❌ Cancel", "cancel")]]),
     )
     return CAPTION
+
+
+async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Back button: re-prompt the previous step based on user_data marks."""
+    q = update.callback_query
+    await q.answer()
+    ud = context.user_data
+    if ud.get("media_files") is None:
+        return None
+
+    # where are we? same inference as start_from_url
+    if ud.get("product_name") is not None and "chosen" not in ud:
+        # at PRODUCT_URL (or PRODUCT_NAME unanswered) -> go back to caption
+        ud.pop("product_name", None)
+        ud.pop("product_url", None)
+        await q.edit_message_text(
+            "✍️ <b>Edit caption</b> — send the caption again.\n"
+            "Hashtags will be moved to the very bottom automatically.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb([[("Skip (no caption)", "cap:skip")] + BACK_ROW]),
+        )
+        return CAPTION
+    if "caption" in ud and "chosen" not in ud:
+        # at CHANNEL not yet opened (came from product_url just answered) —
+        # can't happen here; CHANNEL prompt already rendered -> handled below
+        pass
+    if "chosen" in ud and "when" not in ud:
+        # channel selection done, at MORE_CHANNEL/SCHEDULE -> back to channels
+        ud.pop("chosen", None)
+        await q.edit_message_text(
+            "📍 <b>Choose channel(s)</b> to post to:\n<i>Tap to select, tap again to deselect.</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=channel_keyboard(ud),
+        )
+        return CHANNEL
+    if "when" in ud and "post_date" not in ud:
+        # at DATE/TIME -> back to schedule choice
+        ud.pop("when", None)
+        ud.pop("date", None)
+        await q.edit_message_text(
+            "🕒 <b>When to post?</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb(
+                [
+                    [("🚀 Post immediately", "t:now")],
+                    [("🤖 Auto — next slot per channel", "t:auto")],
+                    [("📅 Schedule", "t:schedule")],
+                ] + [BACK_ROW],
+            ),
+        )
+        return SCHEDULE
+    if "post_date" in ud and "go" not in ud:
+        # at CONFIRM -> back to schedule choice
+        ud.pop("post_date", None)
+        ud.pop("when", None)
+        await q.edit_message_text(
+            "🕒 <b>When to post?</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb(
+                [
+                    [("🚀 Post immediately", "t:now")],
+                    [("🤖 Auto — next slot per channel", "t:auto")],
+                    [("📅 Schedule", "t:schedule")],
+                ] + [BACK_ROW],
+            ),
+        )
+        return SCHEDULE
+    if "caption" in ud:
+        # at PRODUCT_NAME (caption answered, product not yet) -> back to media
+        ud.pop("caption", None)
+        if ud.get("media_files"):
+            await q.edit_message_text(
+                "🖼 Media kept: "
+                f"{len(ud['media_files'])} file(s). Send more, or tap Done.",
+                reply_markup=kb([[("✅ Done", "media:done")] + BACK_ROW]),
+            )
+            return MEDIA
+        await q.edit_message_text(
+            "🔗 <b>Send the URL</b> (Instagram Reels, TikTok, YouTube, etc.)\n"
+            "I'll download the video on the backend.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb([BACK_ROW]),
+        )
+        ud["source"] = "url"
+        return URL
+    # at MEDIA/CAPTION entry (caption not yet) -> back to source choice
+    ud.pop("media_files", None)
+    ud.pop("source", None)
+    await q.edit_message_text(
+        "👋 Let's create a post.\n\n<b>Choose content source:</b>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb([[("📷 Upload Media", "src:upload"), ("🔗 From URL (Reels/Video)", "src:url")]]),
+    )
+    return SOURCE
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -756,25 +854,31 @@ async def start_from_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     Only fires for URLs the downloader supports (see VIDEO_URL_FILTER) —
     affiliate links (Shopee etc.) never trigger a download.
+    Stateless guard: intent is inferred from user_data alone, so a lost
+    conversation state never traps the user (fixes retry-after-download-fail).
     """
     if not is_allowed(update):
         await update.message.reply_text("Not authorized.")
         return ConversationHandler.END
     ud = context.user_data
-    if ud.get("media_files") is not None:
-        # flow already running — this URL belongs to a step inside it.
-        # Delegate to whichever step expects a URL, never restart into download.
-        if ud.get("product_name") is not None and "chosen" not in ud:
-            return await product_url_received(update, context)  # affiliate step
-        await update.message.reply_text(
-            "⚠️ Flow already running — this step doesn't take a video URL. "
-            "Finish the current step or /cancel."
-        )
-        return None  # None from an entry point = not handled -> state handlers run
-    context.user_data.clear()
-    ud["media_files"] = []
-    ud["source"] = "url"
-    return await url_received(update, context)
+    if ud.get("media_files") is None:
+        # fresh start
+        ud.clear()
+        ud["media_files"] = []
+        ud["source"] = "url"
+        return await url_received(update, context)
+    # flow already running — where does this URL belong?
+    if ud.get("product_name") is not None and "chosen" not in ud:
+        return await product_url_received(update, context)  # affiliate step
+    if ud.get("source") == "url" and not ud["media_files"] and "caption" not in ud:
+        # download step: first URL never landed (download failed) — retry it
+        return await url_received(update, context)
+    # any other step (media upload, caption, channel, time): not a URL step
+    await update.message.reply_text(
+        "⚠️ Flow already running — this step doesn't take a video URL. "
+        "Finish the current step or /cancel."
+    )
+    return None  # not handled -> state handlers run
 
 
 async def start_from_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -805,6 +909,7 @@ def main():
     url_filter = filters.Regex(
         r"^\s*https?://(?:[a-z0-9-]+\.)*(?:instagram\.com|instagr\.am|tiktok\.com|youtu\.be|youtube\.com|facebook\.com|fb\.watch|twitter\.com|x\.com)/\S*\s*$"
     )
+    back_handler = CallbackQueryHandler(go_back, pattern=r"^back$")
     conv = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
@@ -819,26 +924,37 @@ def main():
             ],
             URL: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, url_received),
+                back_handler,
             ],
             CAPTION: [
                 CallbackQueryHandler(caption_skip, pattern=r"^cap:skip"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, caption_received),
+                back_handler,
             ],
             PRODUCT_NAME: [
                 CallbackQueryHandler(product_name_skip, pattern=r"^pn:skip"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, product_name_received),
+                back_handler,
             ],
             PRODUCT_URL: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, product_url_received),
+                back_handler,
             ],
-            CHANNEL: [CallbackQueryHandler(channel_toggled, pattern=r"^ch:")],
-            MORE_CHANNEL: [CallbackQueryHandler(more_channel, pattern=r"^more:")],
-            SCHEDULE: [CallbackQueryHandler(time_chosen, pattern=r"^t:")],
-            DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, date_received)],
-            TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, time_received)],
-            CONFIRM: [CallbackQueryHandler(confirmed, pattern=r"^(go|cancel)$")],
+            CHANNEL: [
+                CallbackQueryHandler(channel_toggled, pattern=r"^ch:"),
+                back_handler,
+            ],
+            MORE_CHANNEL: [CallbackQueryHandler(more_channel, pattern=r"^more:"), back_handler],
+            SCHEDULE: [CallbackQueryHandler(time_chosen, pattern=r"^t:"), back_handler],
+            DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, date_received), back_handler],
+            TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, time_received), back_handler],
+            CONFIRM: [CallbackQueryHandler(confirmed, pattern=r"^(go|cancel)$"), back_handler],
         },
-        fallbacks=[CallbackQueryHandler(cancel, pattern=r"^cancel$"), CommandHandler("cancel", cancel)],
+        fallbacks=[
+            CallbackQueryHandler(cancel, pattern=r"^cancel$"),
+            CommandHandler("cancel", cancel),
+            back_handler,
+        ],
         allow_reentry=True,
     )
     app.add_handler(conv)
