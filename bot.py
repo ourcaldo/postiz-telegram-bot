@@ -172,7 +172,7 @@ def auto_date(integration_id):
             if latest is None or dt > latest:
                 latest = dt
     base = latest or now
-    return max(base + timedelta(hours=1), now + timedelta(minutes=5))
+    return max(base + timedelta(hours=2), now + timedelta(minutes=5))
 
 
 def is_allowed(update: Update) -> bool:
