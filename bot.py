@@ -328,14 +328,15 @@ async def get_integrations():
 
 
 def channel_keyboard(ud):
-    """Channel list with ✅ checklist marks, Select All, Done/Cancel."""
+    """Channel list with ✅ checklist marks, Select All (bottom), Done/Cancel."""
     chosen = ud.get("chosen", [])
     ints = ud.get("integrations", [])
     all_selected = len(chosen) == len(ints) and bool(ints)
-    rows = [[("🌐 " + ("✅ " if all_selected else "") + "All channels", "ch:all")]]
+    rows = []
     for i in ints:
         mark = "✅ " if i["id"] in chosen else ""
         rows.append([(f"{mark}{i['name']} ({i['identifier']})", f"ch:{i['id']}")])
+    rows.append([("🌐 " + ("✅ " if all_selected else "") + "All channels", "ch:all")])
     rows.append([("✅ Done — continue", "ch:done")])
     rows.append(BACK_ROW)
     return kb(rows)
@@ -368,9 +369,31 @@ async def channel_toggled(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not chosen:
             await q.answer("Select at least one channel!", show_alert=True)
             return CHANNEL
+        ints = context.user_data.get("integrations", [])
+        all_selected = len(chosen) == len(ints) and bool(ints)
         names = ", ".join(
-            i["name"] for i in context.user_data["integrations"] if i["id"] in chosen
+            i["name"] for i in ints if i["id"] in chosen
         )
+        if all_selected:
+            # every channel already selected — no point asking to add more
+            await context.bot.send_message(
+                q.message.chat_id,
+                f"✅ Channels: <b>all {len(chosen)}</b>",
+                parse_mode=ParseMode.HTML,
+            )
+            await context.bot.send_message(
+                q.message.chat_id,
+                "🕒 <b>When to post?</b>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb(
+                    [
+                        [("🚀 Post immediately", "t:now")],
+                        [("🤖 Auto — next slot per channel", "t:auto")],
+                        [("📅 Schedule", "t:schedule")],
+                    ] + [BACK_ROW]
+                ),
+            )
+            return SCHEDULE
         await context.bot.send_message(
             q.message.chat_id,
             f"✅ Channels: <b>{names}</b>\n\n➕ Add another channel?",
