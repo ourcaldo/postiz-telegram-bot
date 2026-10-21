@@ -46,6 +46,7 @@ ALLOWED_USERS = {
 DOWNLOAD_DIR = Path(os.environ.get("DOWNLOAD_DIR", "/tmp/postiz-media"))
 LANDING_URL = os.environ.get("LANDING_URL", "").rstrip("/")  # https://bio-links.xxx.workers.dev
 LANDING_SECRET = os.environ.get("LANDING_SECRET", "")
+YTDLP_COOKIES_FILE = os.environ.get("YTDLP_COOKIES_FILE", "")
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # conversation states
@@ -561,7 +562,12 @@ async def confirm_summary(update, context, q):
 
 
 def ytdlp_download(url: str, dest_dir: Path) -> Path | None:
-    """Download video from URL using yt-dlp. Returns local file path or None."""
+    """Download video from URL using yt-dlp. Returns local file path or None.
+
+    Instagram requires login cookies (anonymous access is rate-limited);
+    YTDLP_COOKIES_FILE points to a Netscape-format cookies.txt, used for
+    instagram.com URLs only.
+    """
     opts = {
         "outtmpl": str(dest_dir / "%(id)s.%(ext)s"),
         "format": "mp4/bestvideo*+bestaudio/best",
@@ -571,6 +577,11 @@ def ytdlp_download(url: str, dest_dir: Path) -> Path | None:
         "noplaylist": True,
         "max_filesize": 90 * 1024 * 1024,
     }
+    if "instagram.com" in url and YTDLP_COOKIES_FILE:
+        if Path(YTDLP_COOKIES_FILE).exists():
+            opts["cookiefile"] = YTDLP_COOKIES_FILE
+        else:
+            log.warning("YTDLP_COOKIES_FILE missing: %s", YTDLP_COOKIES_FILE)
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
