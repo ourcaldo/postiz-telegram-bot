@@ -149,11 +149,43 @@ def fetch_post_type(integration_id):
     return pt
 
 
-def auto_date(integration_id):
-    """Auto slot: +1h after the channel's latest published/scheduled post.
+WIB = timezone(timedelta(hours=7))  # UTC+7, all auto-slot rules are in WIB
 
-    Never in the past (min now+5min); now+1h if the channel has no history.
+
+def next_8am(now_wib):
+    """Next 08:00 WIB: today if before 08:00, else tomorrow."""
+    d = now_wib.replace(hour=8, minute=0, second=0, microsecond=0)
+    if d <= now_wib:
+        d += timedelta(days=1)
+    return d
+
+
+def clamp_auto_slot(dt, now_wib):
+    """Apply posting window rules to a computed slot.
+
+    - Slots at/after 21:00 or before 08:00 WIB move to next day's 08:00.
+    - Slots in the past get floored to now+5min (only if that still fits
+      the window; otherwise next 08:00).
     """
+    if dt >= dt.replace(hour=21, minute=0, second=0, microsecond=0) or dt.hour < 8:
+        return next_8am(now_wib)
+    if dt <= now_wib:
+        floor = now_wib + timedelta(minutes=5)
+        # floor must also respect the window
+        if floor >= floor.replace(hour=21, minute=0, second=0, microsecond=0) or floor.hour < 8:
+            return next_8am(now_wib)
+        return floor
+    return dt
+
+
+def auto_date(integration_id):
+    """Auto slot per channel, in the daily posting window (WIB).
+
+    Rules: no history (or last slot older than today's window) -> 08:00.
+    Otherwise last post + 2h. Never in the past (min now+5min). Last slot
+    of the day is 21:00: anything landing at/after 21:00 -> next day 08:00.
+    """
+    now_wib = datetime.now(WIB)
     now = datetime.now(timezone.utc)
     start = (now - timedelta(days=30)).strftime("%Y-%m-%d")
     end = (now + timedelta(days=90)).strftime("%Y-%m-%d")
@@ -172,8 +204,11 @@ def auto_date(integration_id):
                 continue
             if latest is None or dt > latest:
                 latest = dt
-    base = latest or now
-    return max(base + timedelta(hours=2), now + timedelta(minutes=5))
+    if latest is None:
+        # fresh channel: 08:00 today if before 08:00, else 08:00 tomorrow
+        return next_8am(now_wib).astimezone(timezone.utc)
+    slot = clamp_auto_slot(latest.astimezone(WIB) + timedelta(hours=2), now_wib)
+    return slot.astimezone(timezone.utc)
 
 
 def is_allowed(update: Update) -> bool:
