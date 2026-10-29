@@ -163,27 +163,23 @@ def next_8am(now_wib):
 def clamp_auto_slot(dt, now_wib):
     """Apply posting window rules to a computed slot.
 
-    - Slots at/after 21:00 or before 08:00 WIB move to next day's 08:00.
-    - Slots in the past get floored to now+5min (only if that still fits
-      the window; otherwise next 08:00).
+    - A missed/empty slot (already in the past) becomes now+5min.
+    - 21:00 WIB is the last allowed slot; anything after it, or before
+      08:00, moves to the next day's 08:00.
     """
-    if dt >= dt.replace(hour=21, minute=0, second=0, microsecond=0) or dt.hour < 8:
-        return next_8am(now_wib)
     if dt <= now_wib:
-        floor = now_wib + timedelta(minutes=5)
-        # floor must also respect the window
-        if floor >= floor.replace(hour=21, minute=0, second=0, microsecond=0) or floor.hour < 8:
-            return next_8am(now_wib)
-        return floor
+        dt = now_wib + timedelta(minutes=5)
+    if dt.hour < 8 or dt > dt.replace(hour=21, minute=0, second=0, microsecond=0):
+        return next_8am(now_wib)
     return dt
 
 
 def auto_date(integration_id):
     """Auto slot per channel, in the daily posting window (WIB).
 
-    Rules: no history (or last slot older than today's window) -> 08:00.
-    Otherwise last post + 2h. Never in the past (min now+5min). Last slot
-    of the day is 21:00: anything landing at/after 21:00 -> next day 08:00.
+    Rules: last post + 2h while that slot is still ahead. If the slot is
+    empty/missed (including no history at all), post now+5min. 21:00 is
+    the last slot; anything after it moves to the next day's 08:00.
     """
     now_wib = datetime.now(WIB)
     now = datetime.now(timezone.utc)
@@ -205,8 +201,8 @@ def auto_date(integration_id):
             if latest is None or dt > latest:
                 latest = dt
     if latest is None:
-        # fresh channel: 08:00 today if before 08:00, else 08:00 tomorrow
-        return next_8am(now_wib).astimezone(timezone.utc)
+        # no history: the slot is empty -> now+5min (window applies)
+        return clamp_auto_slot(now_wib + timedelta(minutes=5), now_wib).astimezone(timezone.utc)
     slot = clamp_auto_slot(latest.astimezone(WIB) + timedelta(hours=2), now_wib)
     return slot.astimezone(timezone.utc)
 
