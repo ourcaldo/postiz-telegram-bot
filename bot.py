@@ -530,8 +530,14 @@ async def ai_caption_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     ud = context.user_data
     if q.data == "ai:use":
-        ud["product_name"] = ud.pop("ai_product_name")
-        ud["caption"] = ud.pop("ai_caption") + "\n\n" + ud.pop("ai_hashtags")
+        name = ud.pop("ai_product_name", None)
+        caption = ud.pop("ai_caption", None)
+        hashtags = ud.pop("ai_hashtags", None)
+        if not (name and caption and hashtags):
+            await q.edit_message_text("This caption expired. Send /start to begin again.")
+            return ConversationHandler.END
+        ud["product_name"] = name
+        ud["caption"] = caption + "\n\n" + hashtags
         await q.edit_message_text(
             "🔗 <b>Send the affiliate URL</b> (Shopee/Tokopedia/etc.)\n"
             "Or tap Skip if there is no product link.",
