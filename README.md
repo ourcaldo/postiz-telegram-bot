@@ -4,7 +4,7 @@ Telegram bot that creates and schedules posts on a self-hosted [Postiz](https://
 
 ## Flow
 
-`/start` → choose source (**Upload Media** or **URL** — Reels/TikTok/YouTube etc., downloaded with yt-dlp) → send media → caption → pick channel(s) (multi-select, from Postiz integrations) → **Post now** or **Schedule** (date + time, WIB) → confirm → bot uploads media to Postiz and creates the post.
+`/start` → choose source (**Upload Media** or **URL** — Reels/TikTok/YouTube etc., downloaded with yt-dlp) → send media → for videos, the bot extracts the audio, transcribes it with Whisper, and generates a caption with DeepSeek (accept or edit it) → caption → pick channel(s) (multi-select, from Postiz integrations) → **Post now** or **Schedule** (date + time, WIB) → confirm → bot uploads media to Postiz and creates the post.
 
 ## Setup (Ubuntu VM)
 
@@ -12,6 +12,7 @@ Telegram bot that creates and schedules posts on a self-hosted [Postiz](https://
 sudo mkdir -p /opt/postiz-bot && sudo chown ubuntu:ubuntu /opt/postiz-bot
 cp bot.py requirements.txt /opt/postiz-bot/
 cd /opt/postiz-bot
+sudo apt install -y ffmpeg   # audio extraction for AI captions
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 cp postiz-bot.env .env   # then edit: real token, API key, ALLOWED_USER_IDS
@@ -29,6 +30,10 @@ journalctl -u postiz-bot -f
 | `POSTIZ_URL` | `<your-postiz>/api/public/v1` |
 | `POSTIZ_API_KEY` | Postiz → Settings → API key |
 | `ALLOWED_USER_IDS` | Comma-separated Telegram user IDs; empty = anyone can use the bot |
+| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID for Workers AI (optional) |
+| `CLOUDFLARE_API_TOKEN` | Cloudflare API token with Workers AI permission (optional) |
+
+AI caption generation is optional: leave the Cloudflare vars empty and the bot falls back to the manual caption step. `CLOUDFLARE_ACCOUNT_IDS` is an optional comma-separated fallback list used when `CLOUDFLARE_ACCOUNT_ID` is empty.
 
 Timezone for scheduling input is WIB (UTC+7); the API receives UTC.
 

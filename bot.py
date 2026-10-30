@@ -6,9 +6,12 @@ Flow: /start -> source (upload/url) -> media -> caption -> product name -> produ
 """
 
 import asyncio
+import html
+import json
 import logging
 import os
 import re
+import subprocess
 import tempfile
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -47,11 +50,25 @@ DOWNLOAD_DIR = Path(os.environ.get("DOWNLOAD_DIR", "/tmp/postiz-media"))
 LANDING_URL = os.environ.get("LANDING_URL", "").rstrip("/")  # https://bio-links.xxx.workers.dev
 LANDING_SECRET = os.environ.get("LANDING_SECRET", "")
 YTDLP_COOKIES_FILE = os.environ.get("YTDLP_COOKIES_FILE", "")
+CF_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip() or next(
+    (
+        x.strip()
+        for x in os.environ.get("CLOUDFLARE_ACCOUNT_IDS", "").split(",")
+        if x.strip()
+    ),
+    "",
+)
+CF_API_TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "@cf/openai/whisper")
+CAPTION_MODEL = os.environ.get(
+    "CAPTION_MODEL", "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+)
+AI_READY = bool(CF_ACCOUNT_ID and CF_API_TOKEN)
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # conversation states
-SOURCE, MEDIA, URL, CAPTION, PRODUCT_NAME, PRODUCT_URL, CHANNEL, MORE_CHANNEL, SCHEDULE, DATE, TIME, CONFIRM = range(
-    12
+SOURCE, MEDIA, URL, CAPTION, PRODUCT_NAME, PRODUCT_URL, CHANNEL, MORE_CHANNEL, SCHEDULE, DATE, TIME, CONFIRM, AI_CAPTION = range(
+    13
 )
 
 MEDIA_GIF = "media.gif"
@@ -122,6 +139,142 @@ def build_caption(caption, num, url):
     )
     parts = [p for p in (body, tutorial, trailing) if p]
     return "\n\n".join(parts)
+
+
+CAPTION_PROMPT = """Kamu adalah copywriter afiliasi Indonesia. Kamu menerima transkrip audio dari video produk. Tulis caption dalam Bahasa Indonesia dengan format TEPAT tiga blok dipisahkan satu baris kosong:
+
+Blok 1: Nama produk — satu baris, singkat, spesifik. Sertakan merek jika disebut. Jika produk atau merek tidak bisa diidentifikasi dari transkrip, gunakan nama umum yang deskriptif (contoh: Tempat Sampah).
+Blok 2: Caption — maksimal 3 paragraf pendek. Paragraf pertama harus punya hook yang menarik. Singkat, catchy, engaging, natural. Jangan pakai markdown.
+Blok 3: Hashtag — 3 sampai 5 hashtag relevan, dipisahkan spasi, masing-masing diawali #.
+
+Jangan tulis label "Nama Produk:", "Caption:", atau "Hashtag:". Jangan tambah teks lain di luar tiga blok."""
+
+
+def cf_ai(model, body, content_type):
+    """Run a Cloudflare Workers AI model. Returns result dict or None."""
+    url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/run/{model}"
+    try:
+        r = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {CF_API_TOKEN}",
+                "Content-Type": content_type,
+            },
+            data=body,
+            timeout=300,
+        )
+        data = r.json()
+    except (requests.RequestException, ValueError) as e:
+        log.error("cloudflare ai %s error: %s", model, e)
+        return None
+    if r.status_code != 200 or not isinstance(data, dict) or not data.get("success"):
+        log.error("cloudflare ai %s failed: %s %s", model, r.status_code, str(data)[:300])
+        return None
+    return data.get("result")
+
+
+def extract_audio(video_path):
+    """Extract mono 16 kHz MP3 from a video. Returns path or None."""
+    fd, name = tempfile.mkstemp(suffix=".mp3")
+    os.close(fd)
+    out = Path(name)
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-i", str(video_path),
+                "-vn", "-ac", "1", "-ar", "16000", "-b:a", "64k",
+                str(out),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=600,
+        )
+    except subprocess.CalledProcessError as e:
+        log.error(
+            "ffmpeg failed for %s: %s",
+            video_path,
+            e.stderr.decode("utf-8", "replace")[-300:],
+        )
+        out.unlink(missing_ok=True)
+        return None
+    except (OSError, subprocess.SubprocessError) as e:
+        log.error("ffmpeg error for %s: %s", video_path, e)
+        out.unlink(missing_ok=True)
+        return None
+    if not out.exists() or out.stat().st_size == 0:
+        out.unlink(missing_ok=True)
+        return None
+    return out
+
+
+def transcribe_video(video_path):
+    """Whisper transcript of the video's audio, or None."""
+    audio = extract_audio(video_path)
+    if not audio:
+        return None
+    try:
+        result = cf_ai(WHISPER_MODEL, audio.read_bytes(), "audio/mpeg")
+        return ((result or {}).get("text") or "").strip() or None
+    finally:
+        audio.unlink(missing_ok=True)
+
+
+def parse_caption(text):
+    """Split the model output into (product name, caption, hashtags)."""
+    parts = [p.strip() for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
+    if len(parts) < 3:
+        return None
+    name_lines = parts[0].splitlines()
+    if not name_lines:
+        return None
+    name = re.sub(r"^(nama produk|product name)\s*:\s*", "", name_lines[0].strip(), flags=re.I)
+    caption = "\n\n".join(parts[1:-1])
+    caption = re.sub(r"^caption\s*:\s*", "", caption, flags=re.I)
+    hashtags = re.sub(
+        r"^hashtags?\s*:\s*", "", " ".join(parts[-1].split()), flags=re.I
+    )
+    paras = [p.strip() for p in re.split(r"\n\s*\n", caption) if p.strip()]
+    caption = "\n\n".join(paras[:3])
+    tags = [t.strip(".,;") for t in hashtags.split() if t.strip(".,;")]
+    hashtags = " ".join((t if t.startswith("#") else f"#{t}") for t in tags[:5])
+    if not name or not caption or not hashtags:
+        return None
+    return name, caption, hashtags
+
+
+def generate_caption(transcript):
+    """Ask the LLM for (product name, caption, hashtags), or None."""
+    body = json.dumps(
+        {
+            "messages": [
+                {"role": "system", "content": CAPTION_PROMPT},
+                {"role": "user", "content": "Transkrip:\n" + transcript},
+            ],
+            "max_tokens": 3000,
+            "temperature": 0.7,
+        }
+    ).encode()
+    result = cf_ai(CAPTION_MODEL, body, "application/json")
+    try:
+        text = result["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    return parse_caption(text)
+
+
+def generate_caption_from_video(video_path):
+    """Transcribe a video and generate a caption. Returns parsed tuple or None."""
+    transcript = transcribe_video(video_path)
+    if not transcript:
+        log.warning("no transcript for %s", video_path)
+        return None
+    words = len(transcript.split())
+    if words < 8:
+        log.warning("transcript too short for %s (%s words)", video_path, words)
+        return None
+    log.info("transcript %s: %s words", Path(video_path).name, words)
+    return generate_caption(transcript)
 
 
 def fetch_post_type(integration_id):
@@ -282,12 +435,61 @@ async def media_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return MEDIA
 
 
+async def maybe_ai_caption(update, context, q=None):
+    """Generate a caption from the first video. Returns a state or None."""
+    if not AI_READY:
+        return None
+    video = next(
+        (p for p, kind in (context.user_data.get("media_files") or []) if kind == "video"),
+        None,
+    )
+    if not video:
+        return None
+    msg = await (
+        q.edit_message_text("🎧 Transcribing audio & generating caption…")
+        if q
+        else update.message.reply_text("🎧 Transcribing audio & generating caption…")
+    )
+    try:
+        result = await asyncio.to_thread(generate_caption_from_video, video)
+    except Exception:
+        log.exception("ai caption failed")
+        result = None
+    if not result:
+        await msg.edit_text(
+            "✍️ <b>Send the caption / text content</b> for the post.\n"
+            "Hashtags will be moved to the very bottom automatically.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb([[("Skip (no caption)", "cap:skip")] + BACK_ROW]),
+        )
+        return CAPTION
+    name, caption, hashtags = result
+    context.user_data["ai_product_name"] = name
+    context.user_data["ai_caption"] = caption
+    context.user_data["ai_hashtags"] = hashtags
+    preview = f"{name}\n\n{caption}\n\n{hashtags}"
+    await msg.edit_text(
+        "🤖 <b>Generated caption</b>\n\n<pre>" + html.escape(preview) + "</pre>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb(
+            [
+                [("✅ Use this", "ai:use")],
+                [("✏️ Edit manually", "ai:edit"), ("❌ Cancel", "cancel")],
+            ]
+        ),
+    )
+    return AI_CAPTION
+
+
 async def media_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     if not context.user_data["media_files"]:
         await q.edit_message_text("No media yet — send at least one photo/video.")
         return MEDIA
+    state = await maybe_ai_caption(update, context, q)
+    if state:
+        return state
     await q.edit_message_text(
         "✍️ <b>Send the caption / text content</b> for the post.\n"
         "Hashtags will be moved to the very bottom automatically.",
@@ -323,6 +525,32 @@ async def caption_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return PRODUCT_NAME
 
 
+async def ai_caption_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    ud = context.user_data
+    if q.data == "ai:use":
+        ud["product_name"] = ud.pop("ai_product_name")
+        ud["caption"] = ud.pop("ai_caption") + "\n\n" + ud.pop("ai_hashtags")
+        await q.edit_message_text(
+            "🔗 <b>Send the affiliate URL</b> (Shopee/Tokopedia/etc.)\n"
+            "Or tap Skip if there is no product link.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb([[("Skip — no product link", "pu:skip")], BACK_ROW]),
+        )
+        return PRODUCT_URL
+    ud.pop("ai_product_name", None)
+    ud.pop("ai_caption", None)
+    ud.pop("ai_hashtags", None)
+    await q.edit_message_text(
+        "✍️ <b>Send the caption / text content</b> for the post.\n"
+        "Hashtags will be moved to the very bottom automatically.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb([[("Skip (no caption)", "cap:skip")] + BACK_ROW]),
+    )
+    return CAPTION
+
+
 async def product_name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["product_name"] = (update.message.text or "").strip()
     await update.message.reply_text(
@@ -348,6 +576,14 @@ async def product_url_received(update: Update, context: ContextTypes.DEFAULT_TYP
         return PRODUCT_URL
     context.user_data["product_url"] = url
     return await ask_channels(update, context)
+
+
+async def product_url_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    context.user_data["product_name"] = None
+    context.user_data["product_url"] = None
+    return await ask_channels(update, context, q)
 
 
 async def get_integrations():
@@ -568,7 +804,7 @@ def when_text(ud):
         return "🚀 Immediately"
     if ud["when"] == "auto":
         lines = [
-            f"🤖 {name}: {dt.astimezone(timezone(timedelta(hours=7))).strftime('%d %b %H:%M')} WIB"
+            f"🤖 {html.escape(name)}: {dt.astimezone(timezone(timedelta(hours=7))).strftime('%d %b %H:%M')} WIB"
             for cid, dt in ud["auto_dates"].items()
             for name in [next(i["name"] for i in ud["integrations"] if i["id"] == cid)]
         ]
@@ -578,19 +814,21 @@ def when_text(ud):
 
 def confirm_text(ud):
     names = ", ".join(
-        next(i["name"] for i in ud["integrations"] if i["id"] == c)
+        html.escape(next(i["name"] for i in ud["integrations"] if i["id"] == c))
         for c in ud["chosen"]
     )
     media_desc = f"{len(ud['media_files'])} file(s)" if ud["media_files"] else "none"
     product = (
-        f"🛍 Product: {ud['product_name']}\n🔗 URL: {ud['product_url']}\n"
+        f"🛍 Product: {html.escape(ud['product_name'])}\n"
+        f"🔗 URL: {html.escape(ud['product_url'])}\n"
         if ud.get("product_name")
         else ""
     )
+    caption = ud["caption"][:100] or "(none)"
     return (
         "📋 <b>Confirm your post:</b>\n\n"
         f"🖼 Media: {media_desc}\n"
-        f"✍️ Caption: {ud['caption'][:100] or '(none)'}{'…' if len(ud['caption']) > 100 else ''}\n"
+        f"✍️ Caption: {html.escape(caption)}{'…' if len(ud['caption']) > 100 else ''}\n"
         f"{product}"
         f"📍 Channels: {names}\n"
         f"🕒 When: {when_text(ud)}"
@@ -800,7 +1038,13 @@ async def url_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["media_files"].append((str(path), kind))
     await update.message.reply_text(
         f"✅ Video downloaded: <code>{path.name}</code> "
-        f"({path.stat().st_size // 1024} KB).\n\n"
+        f"({path.stat().st_size // 1024} KB).",
+        parse_mode=ParseMode.HTML,
+    )
+    state = await maybe_ai_caption(update, context)
+    if state:
+        return state
+    await update.message.reply_text(
         "✍️ <b>Send the caption</b> for this post.",
         parse_mode=ParseMode.HTML,
         reply_markup=kb([[("Skip (no caption)", "cap:skip"), ("❌ Cancel", "cancel")]]),
@@ -1002,6 +1246,7 @@ def main():
                 back_handler,
             ],
             PRODUCT_URL: [
+                CallbackQueryHandler(product_url_skip, pattern=r"^pu:skip"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, product_url_received),
                 back_handler,
             ],
@@ -1014,6 +1259,7 @@ def main():
             DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, date_received), back_handler],
             TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, time_received), back_handler],
             CONFIRM: [CallbackQueryHandler(confirmed, pattern=r"^(go|cancel)$"), back_handler],
+            AI_CAPTION: [CallbackQueryHandler(ai_caption_choice, pattern=r"^ai:")],
         },
         fallbacks=[
             CallbackQueryHandler(cancel, pattern=r"^cancel$"),
